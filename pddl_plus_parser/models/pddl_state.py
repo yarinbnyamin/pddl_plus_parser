@@ -13,6 +13,8 @@ from .pddl_predicate import GroundedPredicate
 class State:
     """A representation of a state in a trajectory."""
 
+    __slots__ = ("is_init", "state_predicates", "state_fluents")
+
     is_init: bool
     # Maps between a lifted predicate definition to all of its problem groundings
     state_predicates: Dict[str, Set[GroundedPredicate]]

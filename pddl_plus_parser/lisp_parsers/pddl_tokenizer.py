@@ -51,7 +51,10 @@ class PDDLTokenizer:
         return tokens
 
     def read_from_tokens(self, tokens: deque) -> Expression:
-        """Extract concrete PDDL expressions from the tokens.
+        """Extract a single concrete PDDL expression from the tokens.
+
+        Parsing is done iteratively with an explicit stack (rather than recursively) so that large
+        trajectories with deeply nested expressions do not incur the per-token Python call overhead.
 
         :param tokens: the list of tokens extracted from the PDDL file.
         :return: concrete PDDL expressions that can be converted to objects.
@@ -60,18 +63,31 @@ class PDDLTokenizer:
             raise SyntaxError("Unexpected EOF")
 
         token = tokens.popleft()
-        if token == "(":
-            expression = []
-            while tokens[0] != ")":
-                expression.append(self.read_from_tokens(tokens))
-
-            tokens.popleft()  # pop off ')'
-            return expression
-
         if token == ")":
             raise SyntaxError("Unexpected ) while parsing the expressions")
 
-        return token
+        if token != "(":
+            return token  # a top-level atom.
+
+        root = []
+        stack = [root]
+        while stack:
+            if len(tokens) == 0:
+                raise SyntaxError("Unexpected EOF")
+
+            token = tokens.popleft()
+            if token == "(":
+                nested_expression = []
+                stack[-1].append(nested_expression)
+                stack.append(nested_expression)
+
+            elif token == ")":
+                stack.pop()
+
+            else:
+                stack[-1].append(token)
+
+        return root
 
     def parse(self) -> Expression:
         """Extracts the expressions from the PDDL file.

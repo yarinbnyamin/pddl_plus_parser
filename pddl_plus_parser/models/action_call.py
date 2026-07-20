@@ -8,6 +8,8 @@ NOP_ACTION = "nop"
 class ActionCall:
     """An object representing a single action call."""
 
+    __slots__ = ("name", "parameters")
+
     name: str
     parameters: List[str]
 
@@ -28,6 +30,8 @@ class ActionCall:
 
 class JointActionCall:
     """An object representing a single action call."""
+
+    __slots__ = ("actions",)
 
     actions: List[ActionCall]
 

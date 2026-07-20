@@ -9,6 +9,8 @@ from .pddl_predicate import SignatureType
 class PDDLFunction:
     """Class that represents a numerical function."""
 
+    __slots__ = ("name", "signature", "stored_value", "repeating_variables")
+
     name: str
     signature: SignatureType
     stored_value: float

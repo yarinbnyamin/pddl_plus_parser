@@ -9,6 +9,8 @@ from pddl_plus_parser.models.pddl_state import State
 class ObservedComponent:
     """Class representing a single observed component."""
 
+    __slots__ = ("previous_state", "grounded_action_call", "next_state", "is_successful")
+
     previous_state: State
     grounded_action_call: ActionCall
     next_state: State
@@ -36,6 +38,8 @@ class ObservedComponent:
 
 class MultiAgentComponent:
     """class representing a multi-agent observed component."""
+
+    __slots__ = ("previous_state", "grounded_joint_action", "next_state", "is_successful")
 
     previous_state: State
     grounded_joint_action: JointActionCall

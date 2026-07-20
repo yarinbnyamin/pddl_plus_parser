@@ -9,6 +9,8 @@ SignatureType = Dict[str, PDDLType]
 class Predicate:
     """Class that represents a boolean predicate."""
 
+    __slots__ = ("name", "signature", "is_positive")
+
     name: str
     signature: SignatureType
     is_positive: bool
@@ -105,6 +107,8 @@ class Predicate:
 class GroundedPredicate(Predicate):
     """Class defining a grounded predicate."""
 
+    __slots__ = ("object_mapping", "is_masked")
+
     object_mapping: Dict[str, str]
     is_masked: bool
 
@@ -184,4 +188,8 @@ class GroundedPredicate(Predicate):
         return f"(not ({self.name} {signature_str}))"
 
     def __hash__(self):
-        return hash(self.__str__())
+        # Two grounded predicates are equal iff they share the same name, polarity and object
+        # grounding (see __eq__), all captured by the untyped representation. Hashing on it (instead
+        # of the typed __str__) avoids per-parameter type formatting on every set insertion while
+        # remaining consistent with equality.
+        return hash(self.untyped_representation)

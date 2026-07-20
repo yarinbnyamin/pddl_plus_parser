@@ -39,6 +39,22 @@ class TrajectoryParser:
         self.partial_domain = partial_domain
         self.problem = problem
         self.logger = logging.getLogger(__name__)
+        self._possible_objects = None
+        # When interning is enabled, maps a grounded predicate's untyped representation to a single
+        # shared GroundedPredicate instance that is reused across every state it appears in.
+        self._predicate_cache: Optional[Dict[str, GroundedPredicate]] = None
+
+    @property
+    def possible_objects(self) -> Dict[str, PDDLObject]:
+        """The combined mapping of problem objects and domain constants.
+
+        This mapping is constant for the lifetime of the parser, so it is computed once and cached
+        to avoid rebuilding it for every grounded predicate / fluent that is parsed.
+        """
+        if self._possible_objects is None:
+            self._possible_objects = {**self.problem.objects, **self.partial_domain.constants}
+
+        return self._possible_objects
 
     def _read_trajectory_file(self, trajectory_file_path: Path) -> PDDLTokenizer:
         """Reads the trajectory file and exports the lines containing the data about the trajectory.
@@ -71,7 +87,7 @@ class TrajectoryParser:
                 function_data = expression[1]
                 assigned_value = float(expression[2])
                 numeric_fluent = self.parse_grounded_numeric_fluent(function_data)
-                self.logger.debug(f"Setting the fluent's value to - {assigned_value}")
+                self.logger.debug("Setting the fluent's value to - %s", assigned_value)
                 numeric_fluent.set_value(assigned_value)
                 state_fluents[numeric_fluent.untyped_representation] = numeric_fluent
                 continue
@@ -79,7 +95,16 @@ class TrajectoryParser:
             if expression[0] in self.partial_domain.predicates:
                 self.logger.debug("Component found is a predicate, starting to process it.")
                 lifted_predicate = self.partial_domain.predicates[expression[0]]
-                grounded_predicate = self.parse_grounded_predicate(expression, lifted_predicate)
+                if self._predicate_cache is not None:
+                    # Reuse a single shared instance per unique grounded fact across all states.
+                    predicate_key = f"({expression[0]} {' '.join(expression[1:])})"
+                    grounded_predicate = self._predicate_cache.get(predicate_key)
+                    if grounded_predicate is None:
+                        grounded_predicate = self.parse_grounded_predicate(expression, lifted_predicate)
+                        self._predicate_cache[predicate_key] = grounded_predicate
+                else:
+                    grounded_predicate = self.parse_grounded_predicate(expression, lifted_predicate)
+
                 state_predicates[lifted_predicate.untyped_representation].add(grounded_predicate)
                 continue
 
@@ -94,7 +119,7 @@ class TrajectoryParser:
         :return: the function object representing the grounded fluent.
         """
         function_name = grounded_numeric_fluent[0]
-        self.logger.info(f"Starting to parse the grounded numeric fluent - {function_name}")
+        self.logger.info("Starting to parse the grounded numeric fluent - %s", function_name)
         assert function_name in self.partial_domain.functions
         lifted_function = self.partial_domain.functions[function_name]
         # For now, assuming that fluents have valid parameters.
@@ -113,7 +138,7 @@ class TrajectoryParser:
             }
             return PDDLFunction(name=function_name, signature=fluent_signature)
 
-        possible_objects = {**self.problem.objects, **self.partial_domain.constants}
+        possible_objects = self.possible_objects
         fluent_signature = {object_name: possible_objects[object_name].type for object_name in fluent_signature_items}
         for grounded_param_type, lifted_param_type in zip(
             fluent_signature.values(), lifted_function.signature.values()
@@ -134,8 +159,9 @@ class TrajectoryParser:
         predicate_name = lifted_predicate.name
         predicate_signature_items = grounded_predicate_ast[1:]
         self.logger.info(
-            f"Starting the parse the grounded predicate - {predicate_name} "
-            f"with the signature - {predicate_signature_items}."
+            "Starting the parse the grounded predicate - %s with the signature - %s.",
+            predicate_name,
+            predicate_signature_items,
         )
         if len(predicate_signature_items) != len(lifted_predicate.signature):
             raise ValueError(
@@ -147,10 +173,7 @@ class TrajectoryParser:
             for object_name, parameter_name in zip(predicate_signature_items, lifted_predicate.signature)
         }
         if self.problem is not None:
-            object_and_consts = {
-                **self.problem.objects,
-                **self.partial_domain.constants,
-            }
+            object_and_consts = self.possible_objects
             grounded_signature = {
                 param_name: object_and_consts[object_name].type for param_name, object_name in object_mapping.items()
             }
@@ -170,7 +193,7 @@ class TrajectoryParser:
         :param action_call_ast: a grounded action call in the form: [(<name> <p1> <p2> ... <pn>)]
         :return: the action call object.
         """
-        self.logger.debug(f"Parsing the grounded action call - {action_call_ast}")
+        self.logger.debug("Parsing the grounded action call - %s", action_call_ast)
         action_call_data = action_call_ast[0]
         return ActionCall(name=action_call_data[0], grounded_parameters=action_call_data[1:])
 
@@ -249,6 +272,7 @@ class TrajectoryParser:
         executing_agents: List[str] = None,
         strict_trajectory_validation: bool = False,
         contain_transitions_status: bool = False,
+        intern_predicates: bool = False,
     ) -> Union[Observation, MultiAgentObservation]:
         """Parse a trajectory and extracts the observed data into objects.
 
@@ -258,8 +282,14 @@ class TrajectoryParser:
         :param strict_trajectory_validation: whether to validate the trajectory's  syntax strictly
                 (mainly verify that the initial state.is labeled accordingly).
         :param contain_transitions_status: whether the trajectory contains transition status labels.
+        :param intern_predicates: memory optimization for large trajectories. When enabled, identical
+                grounded predicates are represented by a single shared instance across every state,
+                and each next state is reused as the following component's previous state instead of
+                being deep-copied. This greatly reduces memory usage, but yields a read-only
+                observation: the returned states share objects, so they must not be mutated in place.
         :return: the observation extracted from the serialized trajectory.
         """
+        self._predicate_cache = {} if intern_predicates else None
         if trajectory_file_path is None and trajectory_string is None:
             raise ValueError("Either trajectory_file_path or trajectory_string should be provided.")
 
@@ -326,6 +356,8 @@ class TrajectoryParser:
                 previous_state, action_call, next_state, is_successful_transition=is_transition_successful
             )
 
-            previous_state = next_state.copy()
+            # When interning, share the next state directly (read-only observation) to avoid
+            # duplicating every state that is both a next state and the following previous state.
+            previous_state = next_state if intern_predicates else next_state.copy()
 
         return observation
