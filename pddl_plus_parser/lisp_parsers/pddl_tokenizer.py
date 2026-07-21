@@ -59,10 +59,12 @@ class PDDLTokenizer:
         :param tokens: the list of tokens extracted from the PDDL file.
         :return: concrete PDDL expressions that can be converted to objects.
         """
-        if len(tokens) == 0:
+        token_iterator = iter(tokens)
+        try:
+            token = next(token_iterator)
+        except StopIteration:
             raise SyntaxError("Unexpected EOF")
 
-        token = tokens.popleft()
         if token == ")":
             raise SyntaxError("Unexpected ) while parsing the expressions")
 
@@ -71,23 +73,25 @@ class PDDLTokenizer:
 
         root = []
         stack = [root]
-        while stack:
-            if len(tokens) == 0:
-                raise SyntaxError("Unexpected EOF")
-
-            token = tokens.popleft()
+        current = root  # cache the innermost expression to avoid repeated stack[-1] indexing.
+        for token in token_iterator:
             if token == "(":
                 nested_expression = []
-                stack[-1].append(nested_expression)
+                current.append(nested_expression)
                 stack.append(nested_expression)
+                current = nested_expression
 
             elif token == ")":
                 stack.pop()
+                if not stack:
+                    return root  # the top-level expression is complete.
+
+                current = stack[-1]
 
             else:
-                stack[-1].append(token)
+                current.append(token)
 
-        return root
+        raise SyntaxError("Unexpected EOF")
 
     def parse(self) -> Expression:
         """Extracts the expressions from the PDDL file.

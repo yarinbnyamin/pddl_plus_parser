@@ -18,6 +18,7 @@ from pddl_plus_parser.models import (
     MultiAgentObservation,
     NOP_ACTION,
     PDDLObject,
+    SignatureType,
 )
 
 
@@ -43,6 +44,10 @@ class TrajectoryParser:
         # When interning is enabled, maps a grounded predicate's untyped representation to a single
         # shared GroundedPredicate instance that is reused across every state it appears in.
         self._predicate_cache: Optional[Dict[str, GroundedPredicate]] = None
+        # When interning is enabled, maps a grounded fluent's untyped representation to its resolved
+        # signature. The signature is identical across every state a fluent appears in (only its
+        # value changes), so it is resolved once and shared, skipping repeated type resolution.
+        self._fluent_signature_cache: Optional[Dict[str, SignatureType]] = None
 
     @property
     def possible_objects(self) -> Dict[str, PDDLObject]:
@@ -130,20 +135,32 @@ class TrajectoryParser:
                 f"Expected - {len(lifted_function.signature)} and received - {len(fluent_signature_items)}"
             )
 
+        # A fluent's signature is identical across every state it appears in (only its value varies),
+        # so when interning is enabled it is resolved once and shared, skipping the type resolution.
+        if self._fluent_signature_cache is not None:
+            fluent_key = f"({function_name} {' '.join(fluent_signature_items)})"
+            cached_signature = self._fluent_signature_cache.get(fluent_key)
+            if cached_signature is not None:
+                return PDDLFunction(name=function_name, signature=cached_signature)
+
         if self.problem is None:
             self.logger.debug("Since we don't know the objects in the problem, we don't need to validate their types.")
             fluent_signature = {
                 object_name: list(lifted_function.signature.values())[index]
                 for index, object_name in enumerate(fluent_signature_items)
             }
-            return PDDLFunction(name=function_name, signature=fluent_signature)
+        else:
+            possible_objects = self.possible_objects
+            fluent_signature = {
+                object_name: possible_objects[object_name].type for object_name in fluent_signature_items
+            }
+            for grounded_param_type, lifted_param_type in zip(
+                fluent_signature.values(), lifted_function.signature.values()
+            ):
+                assert grounded_param_type.is_sub_type(lifted_param_type)
 
-        possible_objects = self.possible_objects
-        fluent_signature = {object_name: possible_objects[object_name].type for object_name in fluent_signature_items}
-        for grounded_param_type, lifted_param_type in zip(
-            fluent_signature.values(), lifted_function.signature.values()
-        ):
-            assert grounded_param_type.is_sub_type(lifted_param_type)
+        if self._fluent_signature_cache is not None:
+            self._fluent_signature_cache[fluent_key] = fluent_signature
 
         return PDDLFunction(name=function_name, signature=fluent_signature)
 
@@ -290,6 +307,7 @@ class TrajectoryParser:
         :return: the observation extracted from the serialized trajectory.
         """
         self._predicate_cache = {} if intern_predicates else None
+        self._fluent_signature_cache = {} if intern_predicates else None
         if trajectory_file_path is None and trajectory_string is None:
             raise ValueError("Either trajectory_file_path or trajectory_string should be provided.")
 
