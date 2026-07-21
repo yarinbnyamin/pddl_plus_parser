@@ -1,7 +1,7 @@
 """Module to encapsulate the functionality of grounded preconditions."""
 
 import logging
-from typing import Set, Tuple, Dict, Optional
+from typing import FrozenSet, Set, Tuple, Dict, Optional
 
 from pddl_plus_parser.models import PDDLFunction
 from pddl_plus_parser.models.grounding_utils import (
@@ -98,6 +98,19 @@ class GroundedPrecondition:
                 raise ValueError(f"Unknown precondition type: {type(lifted_conditions)}")
 
     @staticmethod
+    def _collect_state_predicate_reps(state: State) -> FrozenSet[str]:
+        """Return the untyped representations of every predicate that holds in the state.
+
+        Predicate lookups become O(1) set membership tests instead of re-serializing the whole state
+        (predicates *and* fluents) for every predicate in the precondition. The set is cached on the
+        state, so it is built once and reused across every operator checked against the same state.
+
+        :param state: the state whose predicates should be collected.
+        :return: the set of untyped representations of the state's predicates.
+        """
+        return state.predicate_representations
+
+    @staticmethod
     def _validate_equality_holds(preconditions: Precondition) -> bool:
         """Validate if the equality preconditions hold.
 
@@ -144,6 +157,7 @@ class GroundedPrecondition:
         prev_is_applicable: bool,
         preconditions: Precondition,
         state: State,
+        state_predicate_reps: Optional[Set[str]] = None,
     ) -> bool:
         """Validate if the given predicate is applicable in the given state.
 
@@ -151,23 +165,24 @@ class GroundedPrecondition:
         :param prev_is_applicable: whether the previous conditions were applicable.
         :param preconditions: the preconditions to validate.
         :param state: the state to validate the predicate in.
+        :param state_predicate_reps: the untyped representations of the state's predicates. Provided
+            by the caller so it is computed once per applicability check; computed on demand if None.
         :return: whether the predicate is applicable in the given state.
         """
-        self.logger.debug(
-            f"Validating if the predicate {condition.untyped_representation} " f"is applicable in the state"
-        )
-        positive_condition_predicate = condition.copy()
-        positive_condition_predicate.is_positive = True
+        if state_predicate_reps is None:
+            state_predicate_reps = self._collect_state_predicate_reps(state)
 
-        is_applicable = BinaryOperator[preconditions.binary_operator](
-            prev_is_applicable,
-            (
-                condition.untyped_representation in state.serialize()
-                if condition.is_positive
-                else positive_condition_predicate.untyped_representation not in state.serialize()
-            ),
+        self.logger.debug(
+            "Validating if the predicate %s is applicable in the state", condition.untyped_representation
         )
-        return is_applicable
+        if condition.is_positive:
+            predicate_holds = condition.untyped_representation in state_predicate_reps
+        else:
+            positive_condition_predicate = condition.copy()
+            positive_condition_predicate.is_positive = True
+            predicate_holds = positive_condition_predicate.untyped_representation not in state_predicate_reps
+
+        return BinaryOperator[preconditions.binary_operator](prev_is_applicable, predicate_holds)
 
     def _ground_universal_condition(
         self, condition: UniversalPrecondition, extended_parameter_map: Dict[str, str]
@@ -200,15 +215,22 @@ class GroundedPrecondition:
         condition: UniversalPrecondition,
         state: State,
         problem_objects: Optional[Dict[str, PDDLObject]] = None,
+        state_predicate_reps: Optional[Set[str]] = None,
     ) -> bool:
         """Validate if the given universal precondition is applicable in the given state.
 
         :param condition: the universal precondition to validate.
         :param state: the state to validate the precondition in.
+        :param problem_objects: the objects of the problem to use for the quantified parameter.
+        :param state_predicate_reps: the untyped representations of the state's predicates, computed
+            once per applicability check; computed on demand if None.
         :return: whether the universal precondition is applicable in the given state.
         """
         if not problem_objects:
             raise ValueError("The objects of the problem should be provided for universal preconditions.")
+
+        if state_predicate_reps is None:
+            state_predicate_reps = self._collect_state_predicate_reps(state)
 
         self.logger.debug("Validating if the universal precondition is applicable in the state")
         is_applicable = self._validate_equality_holds(condition)
@@ -224,7 +246,9 @@ class GroundedPrecondition:
                 if isinstance(sub_condition, GroundedPredicate):
                     is_applicable = BinaryOperator[grounded_precondition.binary_operator](
                         is_applicable,
-                        self._validate_predicates_hold(sub_condition, is_applicable, condition, state),
+                        self._validate_predicates_hold(
+                            sub_condition, is_applicable, condition, state, state_predicate_reps
+                        ),
                     )
 
                 elif isinstance(sub_condition, NumericalExpressionTree):
@@ -236,7 +260,9 @@ class GroundedPrecondition:
                 elif isinstance(sub_condition, Precondition):
                     is_applicable = BinaryOperator[grounded_precondition.binary_operator](
                         is_applicable,
-                        self._is_condition_applicable(sub_condition, state, problem_objects),
+                        self._is_condition_applicable(
+                            sub_condition, state, problem_objects, state_predicate_reps
+                        ),
                     )
 
         return is_applicable
@@ -246,20 +272,26 @@ class GroundedPrecondition:
         preconditions: Precondition,
         state: State,
         problem_objects: Optional[Dict[str, PDDLObject]] = None,
+        state_predicate_reps: Optional[Set[str]] = None,
     ) -> bool:
         """Validate if the given condition is applicable in the given state.
 
         :param preconditions: the condition to validate.
         :param state: the state to validate the condition in.
         :param problem_objects: the objects of the problem to use for universal preconditions.
+        :param state_predicate_reps: the untyped representations of the state's predicates, computed
+            once per applicability check and threaded through the recursion; computed if None.
         :return: whether the condition is applicable in the given state.
         """
+        if state_predicate_reps is None:
+            state_predicate_reps = self._collect_state_predicate_reps(state)
+
         is_applicable = self._validate_equality_holds(preconditions)
         for condition in preconditions.operands:
             if isinstance(condition, GroundedPredicate):
                 is_applicable = BinaryOperator[preconditions.binary_operator](
                     is_applicable,
-                    self._validate_predicates_hold(condition, is_applicable, preconditions, state),
+                    self._validate_predicates_hold(condition, is_applicable, preconditions, state, state_predicate_reps),
                 )
 
             elif isinstance(condition, NumericalExpressionTree):
@@ -270,11 +302,13 @@ class GroundedPrecondition:
 
             elif isinstance(condition, Precondition):
                 is_applicable = BinaryOperator[preconditions.binary_operator](
-                    is_applicable, self._is_condition_applicable(condition, state)
+                    is_applicable, self._is_condition_applicable(condition, state, state_predicate_reps=state_predicate_reps)
                 )
 
             elif isinstance(condition, UniversalPrecondition):
-                is_applicable = self._validate_universal_precondition(condition, state, problem_objects)
+                is_applicable = self._validate_universal_precondition(
+                    condition, state, problem_objects, state_predicate_reps
+                )
                 continue
 
             else:
@@ -329,4 +363,7 @@ class GroundedPrecondition:
         :return: True if the precondition is satisfied, False otherwise.
         """
         self.logger.debug("Validating if the preconditions hold in the state.")
-        return self._is_condition_applicable(self._grounded_precondition.root, state, problem_objects)
+        state_predicate_reps = self._collect_state_predicate_reps(state)
+        return self._is_condition_applicable(
+            self._grounded_precondition.root, state, problem_objects, state_predicate_reps
+        )

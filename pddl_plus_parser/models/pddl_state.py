@@ -1,6 +1,6 @@
 """Module that represents a state definition in a PDDL trajectory."""
 
-from typing import Dict, Set
+from typing import Dict, FrozenSet, Set
 
 from anytree import AnyNode
 
@@ -13,7 +13,7 @@ from .pddl_predicate import GroundedPredicate
 class State:
     """A representation of a state in a trajectory."""
 
-    __slots__ = ("is_init", "state_predicates", "state_fluents")
+    __slots__ = ("is_init", "state_predicates", "state_fluents", "_predicate_reps")
 
     is_init: bool
     # Maps between a lifted predicate definition to all of its problem groundings
@@ -30,6 +30,30 @@ class State:
         self.state_predicates = predicates
         self.state_fluents = fluents
         self.is_init = is_init
+        # Lazily-built cache of the untyped representations of every predicate that holds in the
+        # state. Applicability checks call this repeatedly (once per operator over the same state),
+        # so it is built once and reused. Invalidated whenever the state's predicates change.
+        self._predicate_reps = None
+
+    @property
+    def predicate_representations(self) -> FrozenSet[str]:
+        """The set of untyped representations of every predicate that holds in the state.
+
+        Built once and cached, so predicate applicability checks become O(1) membership tests
+        instead of re-serializing the whole state (predicates and fluents) for every predicate.
+        """
+        if self._predicate_reps is None:
+            self._predicate_reps = frozenset(
+                predicate.untyped_representation
+                for grounded_predicates in self.state_predicates.values()
+                for predicate in grounded_predicates
+            )
+
+        return self._predicate_reps
+
+    def invalidate_predicate_representations(self) -> None:
+        """Drop the cached predicate representations after the state's predicates were mutated."""
+        self._predicate_reps = None
 
     def __eq__(self, other: "State") -> bool:
         my_predicates = {

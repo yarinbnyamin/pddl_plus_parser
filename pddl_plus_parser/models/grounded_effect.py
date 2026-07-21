@@ -166,6 +166,9 @@ class GroundedEffect:
         """
         self.logger.debug("The antecedents for the effect hold so applying the effect.")
         self._apply_discrete_effects(next_state_predicates=state.state_predicates)
+        # The discrete effects mutated the state's predicates in place, so any cached predicate
+        # representations are now stale and must be rebuilt on next access.
+        state.invalidate_predicate_representations()
         new_values = []
         for grounded_expression in self.grounded_numeric_effects:
             new_values.append(
